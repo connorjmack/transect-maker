@@ -23,10 +23,24 @@ with st.sidebar:
     st.info("Instructions:\n1. Use the Polyline tool (top left on map) to draw your baseline.\n2. Click 'Generate Transects'.")
 
 # --- MAP SETUP ---
-# Start centered on San Diego (or your area of interest)
-m = folium.Map(location=[32.87, -117.25], zoom_start=15, tiles=None)
+# Enable scrollWheelZoom explicitly. 
+# We disable doubleClickZoom because double-clicking is used to 'finish' a line in drawing mode.
+m = folium.Map(
+    location=[32.87, -117.25], 
+    zoom_start=15, 
+    tiles=None,
+    scrollWheelZoom=True,
+    doubleClickZoom=False  
+)
 
-# Add Esri Satellite Imagery (Best for coastal/cliffs)
+# 1. Add Street Map FIRST (so it sits in the background list)
+folium.TileLayer(
+    'OpenStreetMap',
+    name='Street Map',
+    control=True
+).add_to(m)
+
+# 2. Add Satellite Imagery SECOND (so it becomes the active default)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attr='Esri',
@@ -35,20 +49,17 @@ folium.TileLayer(
     control=True
 ).add_to(m)
 
-# Add a standard street map as an option (good for orientation)
-folium.TileLayer(
-    'OpenStreetMap',
-    name='Street Map',
-    control=True
-).add_to(m)
-
 # Add Layer Control to switch between them
 folium.LayerControl().add_to(m)
 
 # Setup the Draw Tool
+# We add a 'draw' configuration to allow some geometry editing
 draw = Draw(
     draw_options={
-        'polyline': True,
+        'polyline': {
+            'allowIntersection': False,  # Optional: prevents drawing self-intersecting loops
+            'showLength': True
+        },
         'polygon': False,
         'rectangle': False,
         'circle': False,
@@ -80,45 +91,45 @@ if output and "all_drawings" in output and output["all_drawings"]:
             if st.button("⚡ Generate Transects", type="primary"):
                 with st.spinner("Calculating geometry..."):
                     try:
-                        # 1. Run the math
+                        # 1. Run the math (Now returns UTM)
                         result_gdf = tu.generate_transects(
                             line_geom, 
                             spacing_m=transect_interval, 
                             length_m=transect_len
                         )
                         
-# ... (previous code where you generate result_gdf) ...
-                        
                         st.success(f"Generated {len(result_gdf)} transects!")
+                        
+                        # Show which CRS was used (e.g., EPSG:32611 for UTM Zone 11N)
+                        st.info(f"Export Projection: {result_gdf.crs.name} ({result_gdf.crs.to_string()})")
+
+                        # Display the data - coordinates will now look like "328000, 4800000" (Meters)
                         st.dataframe(result_gdf.drop(columns='geometry').head())
 
                         # --- SHAPEFILE EXPORT LOGIC ---
-                        # Create a temporary directory to hold the shapefile components
                         with tempfile.TemporaryDirectory() as tmp_dir:
-                            # Define the path for the shapefile inside the temp folder
                             shp_path = os.path.join(tmp_dir, "transects.shp")
                             
-                            # Save the GeoDataFrame to that path
+                            # This now saves the .prj file with the UTM definition
                             result_gdf.to_file(shp_path)
                             
-                            # Zip the directory containing the .shp, .shx, .dbf, .prj files
-                            # shutil.make_archive creates a zip file named 'transects.zip'
                             zip_path = shutil.make_archive(os.path.join(tmp_dir, "transects"), 'zip', tmp_dir)
                             
-                            # Read the zip file back into memory to pass to Streamlit
                             with open(zip_path, "rb") as f:
                                 zip_data = f.read()
 
                             st.download_button(
-                                label="📥 Download Shapefile (ZIP)",
+                                label="📥 Download Shapefile (UTM)",
                                 data=zip_data,
-                                file_name="transects.zip",
+                                file_name="transects_utm.zip",
                                 mime="application/zip"
                             )
                         
-                        # Optional: Add result back to map (Requires re-render strategy or a second map)
-                        # For simplicity in this v1, we just offer the download.
-                        
+                        # OPTIONAL: If you ever want to map these results back onto Folium,
+                        # you would need to create a temporary copy projected to WGS84:
+                        # map_gdf = result_gdf.to_crs("EPSG:4326")
+                        # folium.GeoJson(map_gdf).add_to(m)
+
                     except Exception as e:
                         st.error(f"Error calculating transects: {e}")
         else:

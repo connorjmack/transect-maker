@@ -1,7 +1,6 @@
 import geopandas as gpd
 import numpy as np
 from shapely.geometry import LineString, Point
-from shapely.ops import transform
 import pyproj
 
 def process_user_drawing(draw_data):
@@ -23,22 +22,20 @@ def process_user_drawing(draw_data):
     if geom_type == 'LineString':
         return LineString(coords) # format is (lon, lat)
     else:
-        # In case user draws a polygon, just take the boundary as a line
         return None
 
-def generate_transects(line_geom, spacing_m=1, length_m=20):
+def generate_transects(line_geom, spacing_m=1, length_m=20, smoothing_window=9):
     """
     1. Projects WGS84 line to local UTM.
-    2. Interpolates points at `spacing_m`.
-    3. Calculates perpendicular vectors.
-    4. Creates transect lines of `length_m`.
-    5. Projects back to WGS84.
+    2. Interpolates points.
+    3. Calculates tangents and SMOOTHS them to prevent crossing.
+    4. Creates transect lines.
+    5. Returns GDF in UTM.
     """
-    # Create a simple GDF to utilize GeoPandas projection tools
+    # Create GDF to utilize GeoPandas projection tools
     gdf = gpd.GeoDataFrame(geometry=[line_geom], crs="EPSG:4326")
     
-    # Automatically estimate the best projected CRS (UTM) for this location
-    # accurate_crs is usually a UTM zone based on the geometry centroid
+    # Estimate best UTM zone
     utm_crs = gdf.estimate_utm_crs()
     
     # Project to Meters
@@ -49,11 +46,12 @@ def generate_transects(line_geom, spacing_m=1, length_m=20):
     distances = np.arange(0, total_len, spacing_m)
     points_utm = [line_utm.interpolate(d) for d in distances]
     
-    transect_lines = []
+    # --- VECTOR CALCULATION ---
+    # We collect all raw tangent vectors first
+    tangents = []
     
     for i, pt in enumerate(points_utm):
-        # Determine tangent vector (direction of the line at this point)
-        # For the last point, look backward; otherwise look forward
+        # Calculate raw tangent (direction)
         if i < len(points_utm) - 1:
             p2 = points_utm[i+1]
             dx = p2.x - pt.x
@@ -63,7 +61,37 @@ def generate_transects(line_geom, spacing_m=1, length_m=20):
             dx = pt.x - p_prev.x
             dy = pt.y - p_prev.y
             
-        # Normalize vector
+        # Normalize immediately
+        mag = np.sqrt(dx**2 + dy**2)
+        if mag > 0:
+            tangents.append([dx/mag, dy/mag])
+        else:
+            tangents.append([0, 0])
+            
+    tangents = np.array(tangents)
+
+    # --- VECTOR SMOOTHING ---
+    # Apply a rolling window average to the vectors.
+    # This prevents "snapping" at sharp corners.
+    # 'mode=edge' repeats the first/last values so the ends don't get wonky.
+    if len(tangents) > smoothing_window:
+        # Create a window (e.g., [1/5, 1/5, 1/5, 1/5, 1/5])
+        window = np.ones(smoothing_window) / smoothing_window
+        
+        # Smooth X and Y components separately
+        smooth_dx = np.convolve(tangents[:, 0], window, mode='same')
+        smooth_dy = np.convolve(tangents[:, 1], window, mode='same')
+    else:
+        smooth_dx = tangents[:, 0]
+        smooth_dy = tangents[:, 1]
+
+    transect_lines = []
+    
+    for i, pt in enumerate(points_utm):
+        dx = smooth_dx[i]
+        dy = smooth_dy[i]
+        
+        # Re-normalize after smoothing (averaging vectors shrinks them)
         mag = np.sqrt(dx**2 + dy**2)
         if mag == 0: continue
         dx /= mag
@@ -82,9 +110,8 @@ def generate_transects(line_geom, spacing_m=1, length_m=20):
     # Create GDF in UTM
     transects_utm = gpd.GeoDataFrame(geometry=transect_lines, crs=utm_crs)
     
-    # Add ID and Distance metadata
+    # Add metadata
     transects_utm['transect_id'] = range(len(transects_utm))
     transects_utm['dist_along'] = distances[:len(transects_utm)]
     
-    # Project back to Lat/Lon for mapping/export
-    return transects_utm.to_crs("EPSG:4326")
+    return transects_utm
