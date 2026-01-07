@@ -78,6 +78,37 @@ folium.TileLayer(
 # --- ADD GEOCODER ---
 Geocoder().add_to(m)
 
+# --- LOAD AND DISPLAY MOP LINES FROM KML ---
+try:
+    # Enable KML driver support - try multiple methods for compatibility
+    try:
+        import fiona
+        fiona.drvsupport.supported_drivers['KML'] = 'rw'
+    except:
+        try:
+            gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+        except:
+            pass
+
+    # Load the MOP lines KML file
+    mop_lines = gpd.read_file('MOPs-SD.kml')
+
+    # Make sure it's in WGS84 for display
+    if mop_lines.crs is None:
+        mop_lines.set_crs(epsg=4326, inplace=True)
+    else:
+        mop_lines = mop_lines.to_crs(epsg=4326)
+
+    # Add MOP lines to map
+    folium.GeoJson(
+        mop_lines,
+        name="MOP Survey Lines",
+        style_function=lambda x: {'color': '#1FF4FB', 'weight': 3, 'opacity': 0.7},
+        tooltip=folium.GeoJsonTooltip(fields=['Name'], aliases=['Line:'])
+    ).add_to(m)
+except Exception as e:
+    st.warning(f"Could not load MOP lines: {e}")
+
 # --- ADD GENERATED LAYERS IF EXIST ---
 if st.session_state.transect_gdf is not None:
     try:
