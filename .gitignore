@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv
+env/
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Geospatial & Data ---
+# Ignore generated shapefiles and zips so they don't clutter the repo
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.zip
+*.geojson
+*.gpkg
+
+# videos
+*.mp4
+*.mov
+
+# --- IDEs ---
+.vscode/
+.idea/

@@ -2,8 +2,9 @@ import geopandas as gpd
 import numpy as np
 from shapely.geometry import LineString, Point
 import pyproj
+from typing import Tuple, Optional, Any
 
-def process_user_drawing(draw_data):
+def process_user_drawing(draw_data: dict[str, Any]) -> Optional[LineString]:
     """
     Parses the GeoJSON output from Folium Draw and extracts the first LineString.
     """
@@ -24,7 +25,12 @@ def process_user_drawing(draw_data):
     else:
         return None
 
-def generate_transects(line_geom, spacing_m=1, length_m=20, smoothing_window=9):
+def generate_transects(
+    line_geom: LineString, 
+    spacing_m: float = 1.0, 
+    length_m: float = 20.0, 
+    smoothing_window: int = 9
+) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     1. Projects WGS84 line to local UTM.
     2. Interpolates points.
@@ -41,8 +47,15 @@ def generate_transects(line_geom, spacing_m=1, length_m=20, smoothing_window=9):
     # Project to Meters
     line_utm = gdf.to_crs(utm_crs).geometry.iloc[0]
     
-    # Interpolate points along the line
+    # --- INPUT VALIDATION ---
     total_len = line_utm.length
+    if total_len <= spacing_m:
+        raise ValueError(
+            f"Drawn line length ({total_len:.2f}m) is shorter than the interval spacing ({spacing_m}m). "
+            "Please draw a longer line or reduce the interval."
+        )
+
+    # Interpolate points along the line
     distances = np.arange(0, total_len, spacing_m)
     points_utm = [line_utm.interpolate(d) for d in distances]
     
@@ -107,11 +120,16 @@ def generate_transects(line_geom, spacing_m=1, length_m=20, smoothing_window=9):
         
         transect_lines.append(LineString([p_left, p_right]))
         
-    # Create GDF in UTM
+# 1. Create GDF for Transect Lines (The "Crossbars")
     transects_utm = gpd.GeoDataFrame(geometry=transect_lines, crs=utm_crs)
-    
-    # Add metadata
     transects_utm['transect_id'] = range(len(transects_utm))
     transects_utm['dist_along'] = distances[:len(transects_utm)]
     
-    return transects_utm
+    # 2. Create GDF for Baseline Points (The "Centers")
+    # points_utm was already calculated earlier in the function
+    points_gdf = gpd.GeoDataFrame(geometry=points_utm, crs=utm_crs)
+    points_gdf['point_id'] = range(len(points_gdf))
+    points_gdf['dist_along'] = distances[:len(points_gdf)]
+    
+    # Return BOTH GeoDataFrames
+    return transects_utm, points_gdf

@@ -1,0 +1,23 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# OS
+.DS_Store
+
+# Gemin
+.gemini/
+GEMINI.md

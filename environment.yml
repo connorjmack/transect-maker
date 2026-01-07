@@ -1,0 +1,16 @@
+name: transect-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - geopandas
+  - streamlit
+  - folium
+  - shapely
+  - pyproj
+  - numpy
+  - pyarrow
+  - pip
+  - pip:
+    - streamlit-folium
