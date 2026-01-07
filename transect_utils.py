@@ -59,7 +59,7 @@ def generate_transects(
         )
 
     # --- DETECT MOP LINE INTERSECTIONS ---
-    mop_intersections = []  # List of (distance, mop_name, intersection_point)
+    mop_intersections = []  # List of (distance, mop_name, intersection_point, mop_geometry)
 
     if mop_lines_gdf is not None and not mop_lines_gdf.empty:
         # Project MOP lines to same UTM CRS
@@ -73,8 +73,8 @@ def generate_transects(
             # This handles cases where the baseline is drawn offshore from where MOP lines end
             extension_distance = 5000  # Extend 5000m (5km) in each direction
 
-            # Get the line's start and end points
-            coords = list(mop_geom.coords)
+            # Get the line's start and end points (force 2D by taking only x,y)
+            coords = [(x, y) for x, y, *_ in mop_geom.coords]
             start_pt = Point(coords[0])
             end_pt = Point(coords[-1])
 
@@ -127,7 +127,8 @@ def generate_transects(
                 for point in points:
                     dist_along = line_utm.project(point)
                     mop_name = mop_row.get('Name', f'MOP_{idx}')
-                    mop_intersections.append((dist_along, mop_name, point))
+                    # Store the original (non-extended) MOP geometry for orientation calculation
+                    mop_intersections.append((dist_along, mop_name, point, mop_geom))
 
     # Sort MOP intersections by distance
     mop_intersections.sort(key=lambda x: x[0])
@@ -153,71 +154,166 @@ def generate_transects(
     # Convert to numpy array
     distances = np.array(all_distances)
     points_utm = [line_utm.interpolate(d) for d in distances]
-    
+
+    # Create mapping of distance -> MOP geometry for orientation preservation
+    mop_dist_to_geom = {dist: geom for dist, name, point, geom in mop_intersections}
+
     # --- VECTOR CALCULATION ---
-    # We collect all raw tangent vectors first
-    tangents = []
-    
+    # Calculate baseline normals for ALL points (without MOP influence)
+    # Use average of segment before and segment after for smoother initial normals
+    baseline_normals = []
+
     for i, pt in enumerate(points_utm):
-        # Calculate raw tangent (direction)
-        if i < len(points_utm) - 1:
-            p2 = points_utm[i+1]
-            dx = p2.x - pt.x
-            dy = p2.y - pt.y
-        else:
+        dx_prev, dy_prev = 0, 0
+        dx_next, dy_next = 0, 0
+        
+        if i > 0:
             p_prev = points_utm[i-1]
-            dx = pt.x - p_prev.x
-            dy = pt.y - p_prev.y
+            dx_prev = pt.x - p_prev.x
+            dy_prev = pt.y - p_prev.y
+            mag_prev = np.sqrt(dx_prev**2 + dy_prev**2)
+            if mag_prev > 0:
+                dx_prev /= mag_prev
+                dy_prev /= mag_prev
+        
+        if i < len(points_utm) - 1:
+            p_next = points_utm[i+1]
+            dx_next = p_next.x - pt.x
+            dy_next = p_next.y - pt.y
+            mag_next = np.sqrt(dx_next**2 + dy_next**2)
+            if mag_next > 0:
+                dx_next /= mag_next
+                dy_next /= mag_next
+        
+        # Combine vectors
+        if i == 0:
+            dx, dy = dx_next, dy_next
+        elif i == len(points_utm) - 1:
+            dx, dy = dx_prev, dy_prev
+        else:
+            dx, dy = (dx_prev + dx_next) / 2, (dy_prev + dy_next) / 2
             
-        # Normalize immediately
         mag = np.sqrt(dx**2 + dy**2)
         if mag > 0:
-            tangents.append([dx/mag, dy/mag])
+            # Rotate 90°: (dx, dy) -> (-dy, dx)
+            baseline_normals.append([-dy/mag, dx/mag])
         else:
-            tangents.append([0, 0])
-            
-    tangents = np.array(tangents)
+            baseline_normals.append([0, 0])
 
-    # --- VECTOR SMOOTHING ---
-    # Apply a rolling window average to the vectors.
-    # This prevents "snapping" at sharp corners.
-    # 'mode=edge' repeats the first/last values so the ends don't get wonky.
-    if len(tangents) > smoothing_window:
-        # Create a window (e.g., [1/5, 1/5, 1/5, 1/5, 1/5])
+    baseline_normals = np.array(baseline_normals)
+
+    # --- SMOOTH BASELINE NORMALS ---
+    # Apply smoothing with padding to handle edge effects
+    if len(baseline_normals) > smoothing_window:
         window = np.ones(smoothing_window) / smoothing_window
+        pad_width = smoothing_window // 2
         
-        # Smooth X and Y components separately
-        smooth_dx = np.convolve(tangents[:, 0], window, mode='same')
-        smooth_dy = np.convolve(tangents[:, 1], window, mode='same')
+        # Pad with edge values to maintain orientation at start/end
+        nx_padded = np.pad(baseline_normals[:, 0], pad_width, mode='edge')
+        ny_padded = np.pad(baseline_normals[:, 1], pad_width, mode='edge')
+        
+        smooth_nx = np.convolve(nx_padded, window, mode='valid')
+        smooth_ny = np.convolve(ny_padded, window, mode='valid')
     else:
-        smooth_dx = tangents[:, 0]
-        smooth_dy = tangents[:, 1]
+        smooth_nx = baseline_normals[:, 0]
+        smooth_ny = baseline_normals[:, 1]
+
+    # --- CALCULATE MOP ORIENTATIONS AND APPLY INFLUENCE ---
+    # Build list of MOP indices and their orientations
+    mop_indices = []
+    for i in range(len(points_utm)):
+        current_dist = distances[i]
+
+        # Check if this is a MOP point
+        for mop_dist in mop_dist_to_geom.keys():
+            if abs(current_dist - mop_dist) < 0.01:
+                mop_geom = mop_dist_to_geom[mop_dist]
+                pt = points_utm[i]
+
+                # Calculate MOP orientation
+                closest_dist = mop_geom.project(pt)
+                sample_dist = 1.0
+                d1 = max(0, closest_dist - sample_dist)
+                d2 = min(mop_geom.length, closest_dist + sample_dist)
+
+                p1 = mop_geom.interpolate(d1)
+                p2 = mop_geom.interpolate(d2)
+
+                # MOP line direction
+                mnx = p2.x - p1.x
+                mny = p2.y - p1.y
+                mag = np.sqrt(mnx**2 + mny**2)
+                
+                if mag > 0:
+                    mnx /= mag
+                    mny /= mag
+                    
+                    # CRITICAL: Ensure MOP orientation matches baseline normal direction
+                    # to prevent "X" crossings caused by 180-degree flips
+                    if (mnx * smooth_nx[i] + mny * smooth_ny[i]) < 0:
+                        mnx = -mnx
+                        mny = -mny
+                        
+                    mop_indices.append((i, mnx, mny))
+                break
+
+    # Apply MOP orientations with influence radius
+    influence_radius = 10  # Number of transects on each side to influence
+
+    # Create a new array to store the final orientations
+    final_nx = smooth_nx.copy()
+    final_ny = smooth_ny.copy()
+
+    # For each transect, find the nearest MOP and apply weighted influence
+    for i in range(len(points_utm)):
+        nearest_mop_dist = float('inf')
+        nearest_mop = None
+
+        for mop_i, mop_nx, mop_ny in mop_indices:
+            dist_to_mop = abs(i - mop_i)
+            if dist_to_mop < nearest_mop_dist:
+                nearest_mop_dist = dist_to_mop
+                nearest_mop = (mop_i, mop_nx, mop_ny)
+
+        # If within influence radius of nearest MOP, blend with smoothed baseline
+        if nearest_mop is not None and nearest_mop_dist <= influence_radius:
+            mop_i, mop_nx, mop_ny = nearest_mop
+
+            if nearest_mop_dist == 0:
+                final_nx[i] = mop_nx
+                final_ny[i] = mop_ny
+            else:
+                # Nearby transect - blend between MOP and smoothed baseline
+                weight = 1.0 - (nearest_mop_dist / (influence_radius + 1))
+                final_nx[i] = weight * mop_nx + (1 - weight) * smooth_nx[i]
+                final_ny[i] = weight * mop_ny + (1 - weight) * smooth_ny[i]
+
+    smooth_nx = final_nx
+    smooth_ny = final_ny
 
     transect_lines = []
-    
+
     for i, pt in enumerate(points_utm):
-        dx = smooth_dx[i]
-        dy = smooth_dy[i]
-        
-        # Re-normalize after smoothing (averaging vectors shrinks them)
-        mag = np.sqrt(dx**2 + dy**2)
+        # Use the smoothed normal vector (with MOP orientations locked in)
+        nx = smooth_nx[i]
+        ny = smooth_ny[i]
+
+        # Re-normalize after smoothing (averaging vectors can shrink them)
+        mag = np.sqrt(nx**2 + ny**2)
         if mag == 0: continue
-        dx /= mag
-        dy /= mag
-        
-        # Rotate 90 degrees to get Normal vector (-dy, dx)
-        nx, ny = -dy, dx
-        
-        # Create offsets
+        nx /= mag
+        ny /= mag
+
+        # Create transect endpoints
         half_len = length_m / 2
         p_left = Point(pt.x + nx * half_len, pt.y + ny * half_len)
         p_right = Point(pt.x - nx * half_len, pt.y - ny * half_len)
-        
+
         transect_lines.append(LineString([p_left, p_right]))
         
 # --- LABEL TRANSECTS ---
     # Create a mapping of distance to MOP name
-    mop_dist_to_name = {dist: name for dist, name, _ in mop_intersections}
+    mop_dist_to_name = {dist: name for dist, name, _, _ in mop_intersections}
 
     labels = []
     for i, dist in enumerate(distances[:len(transect_lines)]):
@@ -225,7 +321,7 @@ def generate_transects(
         is_mop = False
         mop_name = None
 
-        for mop_dist, name, _ in mop_intersections:
+        for mop_dist, name, _, _ in mop_intersections:
             if abs(dist - mop_dist) < 0.01:  # Within 1cm tolerance
                 is_mop = True
                 mop_name = name
@@ -239,7 +335,7 @@ def generate_transects(
             # Find the MOP line immediately before this transect
             mop_before = None
             mop_before_dist = None
-            for mop_dist, name, _ in mop_intersections:
+            for mop_dist, name, _, _ in mop_intersections:
                 if mop_dist < dist:
                     mop_before = name
                     mop_before_dist = mop_dist
@@ -254,7 +350,7 @@ def generate_transects(
                     check_dist = distances[j]
                     if check_dist > mop_before_dist and check_dist < dist:
                         # Check if this is NOT a MOP transect
-                        is_check_mop = any(abs(check_dist - md) < 0.01 for md, _, _ in mop_intersections)
+                        is_check_mop = any(abs(check_dist - md) < 0.01 for md, _, _, _ in mop_intersections)
                         if not is_check_mop:
                             sub_num += 1
 

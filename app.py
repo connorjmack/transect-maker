@@ -106,33 +106,17 @@ if st.session_state.mop_lines_gdf is None:
             except:
                 pass
 
-        # Load all layers from the KML file
-        # The KML contains multiple survey areas
-        layer_names = [
-            'Cardiff_Solana_100m.kml',
-            'Coronado_200m.kml',
-            'IB_200m.kml',
-            'SSNorth_200m_100m.kml',
-            'SSSouth_200m.kml',
-            'TorreyBlacks_200m.kml',
-            'MOP_lines.kml'
-        ]
+        # Load ONLY the MOP_lines.kml layer (has proper MOP number nomenclature)
+        # The other layers (IB, C/S, etc.) use different naming conventions
+        try:
+            mop_lines = gpd.read_file('MOPs-SD.kml', layer='MOP_lines.kml')
+            # Filter to only include LineString geometries (exclude Point/Marker)
+            mop_lines = mop_lines[mop_lines.geometry.type == 'LineString']
+        except Exception as e:
+            st.warning(f"Could not load MOP lines layer: {e}")
+            mop_lines = None
 
-        all_mop_lines = []
-        for layer in layer_names:
-            try:
-                layer_gdf = gpd.read_file('MOPs-SD.kml', layer=layer)
-                # Filter to only include LineString geometries (exclude Point/Marker)
-                layer_gdf = layer_gdf[layer_gdf.geometry.type == 'LineString']
-                if not layer_gdf.empty:
-                    all_mop_lines.append(layer_gdf)
-            except:
-                pass  # Skip if layer doesn't exist
-
-        if all_mop_lines:
-            # Combine all layers into one GeoDataFrame
-            mop_lines = gpd.GeoDataFrame(pd.concat(all_mop_lines, ignore_index=True))
-
+        if mop_lines is not None and not mop_lines.empty:
             # Make sure it's in WGS84
             if mop_lines.crs is None:
                 mop_lines.set_crs(epsg=4326, inplace=True)
@@ -232,12 +216,13 @@ if output and "all_drawings" in output and output["all_drawings"]:
                 with st.spinner("Calculating geometry..."):
                     try:
                         # 1. Run the math
+                        # Only use MOP lines if the checkbox is enabled
                         transect_gdf, points_gdf = tu.generate_transects(
                             line_geom,
                             spacing_m=transect_interval,
                             length_m=transect_len,
                             smoothing_window=smoothing_window,
-                            mop_lines_gdf=st.session_state.mop_lines_gdf
+                            mop_lines_gdf=st.session_state.mop_lines_gdf if st.session_state.show_mop_lines else None
                         )
 
                         # 2. Update Session State
