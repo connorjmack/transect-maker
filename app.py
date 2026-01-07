@@ -3,6 +3,7 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw, Geocoder
 import geopandas as gpd
+import pandas as pd
 import json
 import transect_utils as tu # Import our utils file
 import tempfile
@@ -90,22 +91,43 @@ try:
         except:
             pass
 
-    # Load the MOP lines KML file
-    mop_lines = gpd.read_file('MOPs-SD.kml')
+    # Load all layers from the KML file
+    # The KML contains multiple survey areas
+    layer_names = [
+        'Cardiff_Solana_100m.kml',
+        'Coronado_200m.kml',
+        'IB_200m.kml',
+        'SSNorth_200m_100m.kml',
+        'SSSouth_200m.kml',
+        'TorreyBlacks_200m.kml',
+        'MOP_lines.kml'
+    ]
 
-    # Make sure it's in WGS84 for display
-    if mop_lines.crs is None:
-        mop_lines.set_crs(epsg=4326, inplace=True)
-    else:
-        mop_lines = mop_lines.to_crs(epsg=4326)
+    all_mop_lines = []
+    for layer in layer_names:
+        try:
+            layer_gdf = gpd.read_file('MOPs-SD.kml', layer=layer)
+            all_mop_lines.append(layer_gdf)
+        except:
+            pass  # Skip if layer doesn't exist
 
-    # Add MOP lines to map
-    folium.GeoJson(
-        mop_lines,
-        name="MOP Survey Lines",
-        style_function=lambda x: {'color': '#1FF4FB', 'weight': 3, 'opacity': 0.7},
-        tooltip=folium.GeoJsonTooltip(fields=['Name'], aliases=['Line:'])
-    ).add_to(m)
+    if all_mop_lines:
+        # Combine all layers into one GeoDataFrame
+        mop_lines = gpd.GeoDataFrame(pd.concat(all_mop_lines, ignore_index=True))
+
+        # Make sure it's in WGS84 for display
+        if mop_lines.crs is None:
+            mop_lines.set_crs(epsg=4326, inplace=True)
+        else:
+            mop_lines = mop_lines.to_crs(epsg=4326)
+
+        # Add MOP lines to map
+        folium.GeoJson(
+            mop_lines,
+            name="MOP Survey Lines",
+            style_function=lambda x: {'color': '#1FF4FB', 'weight': 3, 'opacity': 0.7},
+            tooltip=folium.GeoJsonTooltip(fields=['Name'], aliases=['Line:'])
+        ).add_to(m)
 except Exception as e:
     st.warning(f"Could not load MOP lines: {e}")
 
