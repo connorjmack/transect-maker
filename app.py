@@ -20,6 +20,10 @@ if 'transect_gdf' not in st.session_state:
     st.session_state.transect_gdf = None
 if 'points_gdf' not in st.session_state:
     st.session_state.points_gdf = None
+if 'show_mop_lines' not in st.session_state:
+    st.session_state.show_mop_lines = True
+if 'mop_lines_gdf' not in st.session_state:
+    st.session_state.mop_lines_gdf = None
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
@@ -28,12 +32,21 @@ with st.sidebar:
     transect_interval = st.number_input("Interval Spacing (m)", min_value=0.5, max_value=100.0, value=1.0)
     
     st.divider()
+    st.header("Display Options")
+    show_mop_lines = st.checkbox(
+        "Show MOP Survey Lines",
+        value=st.session_state.show_mop_lines,
+        help="Toggle visibility of existing MOP survey transect lines"
+    )
+    st.session_state.show_mop_lines = show_mop_lines
+
+    st.divider()
     st.header("Advanced Smoothing")
     smoothing_window = st.slider(
-        "Smoothing Window", 
-        min_value=1, 
-        max_value=25, 
-        value=9, 
+        "Smoothing Window",
+        min_value=1,
+        max_value=25,
+        value=9,
         step=2,
         help="Size of the rolling window for vector smoothing. Higher values = smoother turns but less precision at corners."
     )
@@ -79,68 +92,94 @@ folium.TileLayer(
 # --- ADD GEOCODER ---
 Geocoder().add_to(m)
 
-# --- LOAD AND DISPLAY MOP LINES FROM KML ---
-try:
-    # Enable KML driver support - try multiple methods for compatibility
+# --- LOAD MOP LINES FROM KML ---
+# Load MOP lines once and store in session state
+if st.session_state.mop_lines_gdf is None:
     try:
-        import fiona
-        fiona.drvsupport.supported_drivers['KML'] = 'rw'
-    except:
+        # Enable KML driver support - try multiple methods for compatibility
         try:
-            gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+            import fiona
+            fiona.drvsupport.supported_drivers['KML'] = 'rw'
         except:
-            pass
+            try:
+                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+            except:
+                pass
 
-    # Load all layers from the KML file
-    # The KML contains multiple survey areas
-    layer_names = [
-        'Cardiff_Solana_100m.kml',
-        'Coronado_200m.kml',
-        'IB_200m.kml',
-        'SSNorth_200m_100m.kml',
-        'SSSouth_200m.kml',
-        'TorreyBlacks_200m.kml',
-        'MOP_lines.kml'
-    ]
+        # Load all layers from the KML file
+        # The KML contains multiple survey areas
+        layer_names = [
+            'Cardiff_Solana_100m.kml',
+            'Coronado_200m.kml',
+            'IB_200m.kml',
+            'SSNorth_200m_100m.kml',
+            'SSSouth_200m.kml',
+            'TorreyBlacks_200m.kml',
+            'MOP_lines.kml'
+        ]
 
-    all_mop_lines = []
-    for layer in layer_names:
-        try:
-            layer_gdf = gpd.read_file('MOPs-SD.kml', layer=layer)
-            all_mop_lines.append(layer_gdf)
-        except:
-            pass  # Skip if layer doesn't exist
+        all_mop_lines = []
+        for layer in layer_names:
+            try:
+                layer_gdf = gpd.read_file('MOPs-SD.kml', layer=layer)
+                # Filter to only include LineString geometries (exclude Point/Marker)
+                layer_gdf = layer_gdf[layer_gdf.geometry.type == 'LineString']
+                if not layer_gdf.empty:
+                    all_mop_lines.append(layer_gdf)
+            except:
+                pass  # Skip if layer doesn't exist
 
-    if all_mop_lines:
-        # Combine all layers into one GeoDataFrame
-        mop_lines = gpd.GeoDataFrame(pd.concat(all_mop_lines, ignore_index=True))
+        if all_mop_lines:
+            # Combine all layers into one GeoDataFrame
+            mop_lines = gpd.GeoDataFrame(pd.concat(all_mop_lines, ignore_index=True))
 
-        # Make sure it's in WGS84 for display
-        if mop_lines.crs is None:
-            mop_lines.set_crs(epsg=4326, inplace=True)
-        else:
-            mop_lines = mop_lines.to_crs(epsg=4326)
+            # Make sure it's in WGS84
+            if mop_lines.crs is None:
+                mop_lines.set_crs(epsg=4326, inplace=True)
+            else:
+                mop_lines = mop_lines.to_crs(epsg=4326)
 
-        # Add MOP lines to map
+            # Store in session state
+            st.session_state.mop_lines_gdf = mop_lines
+    except Exception as e:
+        st.warning(f"Could not load MOP lines: {e}")
+
+# --- DISPLAY MOP LINES ON MAP ---
+if st.session_state.show_mop_lines and st.session_state.mop_lines_gdf is not None:
+    try:
+        # Add MOP lines to map - only show tooltip with Name field if it exists
+        tooltip_config = None
+        if 'Name' in st.session_state.mop_lines_gdf.columns:
+            tooltip_config = folium.GeoJsonTooltip(fields=['Name'], aliases=['MOP Line:'])
+
         folium.GeoJson(
-            mop_lines,
+            st.session_state.mop_lines_gdf,
             name="MOP Survey Lines",
             style_function=lambda x: {'color': '#1FF4FB', 'weight': 3, 'opacity': 0.7},
-            tooltip=folium.GeoJsonTooltip(fields=['Name'], aliases=['Line:'])
+            tooltip=tooltip_config,
+            marker=None  # Explicitly disable markers
         ).add_to(m)
-except Exception as e:
-    st.warning(f"Could not load MOP lines: {e}")
+    except Exception as e:
+        st.warning(f"Could not display MOP lines: {e}")
 
 # --- ADD GENERATED LAYERS IF EXIST ---
 if st.session_state.transect_gdf is not None:
     try:
         # Reproject to WGS84 for display
         t_disp = st.session_state.transect_gdf.to_crs(epsg=4326)
+
+        # Create tooltip with label if available
+        tooltip_config = None
+        if 'label' in t_disp.columns:
+            tooltip_config = folium.GeoJsonTooltip(fields=['label'], aliases=['Transect:'])
+        else:
+            tooltip_config = "Transect Line"
+
         folium.GeoJson(
             t_disp,
             name="Generated Transects",
             style_function=lambda x: {'color': '#FF4B4B', 'weight': 2},
-            tooltip="Transect Line"
+            tooltip=tooltip_config
         ).add_to(m)
     except Exception as e:
         st.error(f"Error displaying transects: {e}")
@@ -194,16 +233,17 @@ if output and "all_drawings" in output and output["all_drawings"]:
                     try:
                         # 1. Run the math
                         transect_gdf, points_gdf = tu.generate_transects(
-                            line_geom, 
-                            spacing_m=transect_interval, 
+                            line_geom,
+                            spacing_m=transect_interval,
                             length_m=transect_len,
-                            smoothing_window=smoothing_window
+                            smoothing_window=smoothing_window,
+                            mop_lines_gdf=st.session_state.mop_lines_gdf
                         )
-                        
+
                         # 2. Update Session State
                         st.session_state.transect_gdf = transect_gdf
                         st.session_state.points_gdf = points_gdf
-                        
+
                         # 3. Rerun to update map
                         st.rerun()
 
